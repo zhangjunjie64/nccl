@@ -64,6 +64,8 @@ ncclResult_t ncclIbBaseCommInit(struct ncclIbNetCommBase* baseComm, bool isSend)
 
   NCCLCHECK(ncclIbResiliencyInit(baseComm, &baseComm->resiliency));
   baseComm->recvMatchingScheme = ncclParamIbReceiverSideMatchingScheme() == -2 ? BY_INDEX : ncclParamIbReceiverSideMatchingScheme();
+  baseComm->tpRank = -1;
+  baseComm->tpRemoteRank = -1;
 
   if (ncclParamIbOooRq() || (ncclParamIbResiliencyPortFailover() == 1)) {
     baseComm->recvMatchingScheme = BY_ID;
@@ -106,6 +108,14 @@ ncclResult_t ncclIbRecvCommInit(struct ncclIbRecvComm* recvComm) {
 ncclResult_t ncclIbSendCommInit(struct ncclIbSendComm* sendComm) {
   NCCLCHECK(ncclIbBaseCommInit(&sendComm->base, true));
   return ncclSuccess;
+}
+
+void ncclIbSetCommRanks(void* comm, int tpRank, int tpRemoteRank) {
+  if (comm) {
+    struct ncclIbNetCommBase* base = (struct ncclIbNetCommBase*)comm;
+    base->tpRank = tpRank;
+    base->tpRemoteRank = tpRemoteRank;
+  }
 }
 
 std::thread ncclIbAsyncThread;

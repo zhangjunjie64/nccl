@@ -1,0 +1,41 @@
+syntax = "proto3";
+
+package ruijie_json;
+
+service Json {
+  rpc JsonSend (JsonRequest) returns (JsonReply) {}
+  rpc JsonStreamSend (stream JsonRequest) returns (stream JsonReply) {}
+}
+
+message JsonDeviceMsg {
+  string producer_name = 1;             // 厂商名称
+  string device_name = 2;               // 设备名称
+  string device_model = 3;              // 设备型号 
+  string device_ip = 4;                 // 设备IP 
+  string device_vendor = 5;             // 设备vendor 
+  string device_version = 6;            // 设备version  
+}
+
+enum JsonExtensionID {
+  EID_UNSET = 0;            // 未设置扩展ID
+  EID_SN = 1;               // 扩展数据，用于保存SN
+  EID_EXPERIMENTAL = 999;   // 扩展ID最大值
+}
+
+message JsonExtension {
+  JsonExtensionID id = 1; // 扩展ID
+  bytes msg = 2;      // 二进制扩展数据
+}
+
+message JsonRequest {
+  JsonDeviceMsg device_info = 1;        // 设备信息
+  uint32 json_event = 2;                // 具体的事件
+  string json_string = 3;               // 上报信息字符串（标准json格式）
+  int64 timestamp = 4;                  // 毫秒级时间戳.
+  string sensor_path = 5;               // YANG模型数据路径
+  repeated JsonExtension extension = 6; // 扩展字段
+}
+
+message JsonReply {
+  sint32 ret = 1;                       // 处理是否成功，成功为1，失败为0
+}

@@ -102,6 +102,7 @@ set(NCCL_PRIVATE_INCLUDES
     ${CUDAToolkit_INCLUDE_DIRS}
     ${CUDAToolkit_INCLUDE_DIRS}/cccl
     ${CMAKE_BINARY_DIR}/obj/include
+    ${PLUGIN_NET_OBSERV_INCLUDE_DIRS}
 )
 if(NOT NCCL_OS_WINDOWS AND DOCA_HOME)
     list(APPEND NCCL_PRIVATE_INCLUDES ${DOCA_HOME}/include)
@@ -155,6 +156,10 @@ add_custom_target(nccl_header DEPENDS ${NCCL_HEADER_DEPS})
 add_dependencies(nccl nccl_header)
 add_dependencies(nccl_device nccl_header)
 
+if(NCCL_HAS_PROTO)
+    add_dependencies(nccl net_observ_proto)
+endif()
+
 # Set version and output name
 # On Windows, use nccl.dll/nccl.lib (no "lib" prefix) so the import library matches what linkers expect
 # On Linux, use libnccl.so (PREFIX "lib" for Unix convention)
@@ -204,6 +209,7 @@ target_link_libraries(nccl
     ${CMAKE_DL_LIBS}
     CUDA::cudart
     ${EXTRA_LIBS}
+    ${PLUGIN_NET_OBSERV_LINK_LIBS}
 )
 
 # Add version script for symbol visibility control
@@ -298,6 +304,7 @@ target_include_directories(nccl_static
     ${CUDAToolkit_INCLUDE_DIRS}
     ${CUDAToolkit_INCLUDE_DIRS}/cccl
     ${CMAKE_BINARY_DIR}/obj/include
+    ${PLUGIN_NET_OBSERV_INCLUDE_DIRS}
 )
 
 # Add dependency on nccl_header
@@ -319,6 +326,7 @@ target_link_libraries(nccl_static
     ${CMAKE_DL_LIBS}
     CUDA::cudart
     ${EXTRA_LIBS}
+    ${PLUGIN_NET_OBSERV_LINK_LIBS}
 )
 
 # Set CUDA specific flags (match nccl shared library for consistency).

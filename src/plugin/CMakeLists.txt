@@ -4,6 +4,7 @@ add_subdirectory(net)
 add_subdirectory(gin)
 add_subdirectory(tuner)
 add_subdirectory(env)
+add_subdirectory(net_observ)
 
 # Plugin sources
 set(PLUGIN_SOURCES
@@ -18,7 +19,10 @@ set(PLUGIN_SOURCES
     ${PLUGIN_PROFILER_SOURCES}
     ${PLUGIN_TUNER_SOURCES}
     ${PLUGIN_ENV_SOURCES}
+    ${PLUGIN_NET_OBSERV_SOURCES}
 )
 
 # Add plugin sources to parent scope
 set(PLUGIN_SOURCES ${PLUGIN_SOURCES} PARENT_SCOPE)
+set(PLUGIN_NET_OBSERV_INCLUDE_DIRS ${PLUGIN_NET_OBSERV_INCLUDE_DIRS} PARENT_SCOPE)
+set(PLUGIN_NET_OBSERV_LINK_LIBS ${PLUGIN_NET_OBSERV_LINK_LIBS} PARENT_SCOPE)

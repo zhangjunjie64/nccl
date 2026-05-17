@@ -32,6 +32,7 @@ LIBSRCFILES := \
 	$(wildcard plugin/tuner/*.cc) \
 	$(wildcard plugin/profiler/*.cc) \
 	$(wildcard plugin/env/*.cc) \
+	$(wildcard plugin/net_observ/*.cc) \
 	$(wildcard nccl_device/*.cc) \
 	$(wildcard scheduler/*.cc) \
 	$(wildcard gin/*.cc) \

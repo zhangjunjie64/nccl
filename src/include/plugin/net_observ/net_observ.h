@@ -86,6 +86,7 @@ struct Incident {
   bool confirmed;
   double confirmTime;
   std::string ncclError;
+  int coll;
 };
 
 struct RdmaNicInfo {
@@ -172,7 +173,7 @@ class NetworkObserver {
   void stop();
 
   // Direct IB error handling from transport layer
-  void handleIbError(const std::string& rdmaNic, const std::string& peerIp, int wcStatus, int tpRank, int tpRemoteRank);
+  void handleIbError(const std::string& rdmaNic, const std::string& peerIp, int wcStatus, int tpRank, int tpRemoteRank, int coll);
 
   // Accessors for C interface functions
   NicCounterReader& getNicReader() { return nicReader_; }
@@ -244,7 +245,7 @@ void ncclNetObservUpdateRankTopology(const std::vector<std::vector<int>>& nodeRa
 // rdmaNic: RDMA NIC device name (e.g., "mlx5_0")
 // peerIp: Peer node IP address (optional, can be empty)
 // wcStatus: IB work completion status code
-void ncclNetObservHandleIbError(const char* rdmaNic, const char* peerIp, int wcStatus, int tpRank, int tpRemoteRank);
+void ncclNetObservHandleIbError(const char* rdmaNic, const char* peerIp, int wcStatus, int tpRank, int tpRemoteRank, int coll);
 
 }  // namespace net_observ
 

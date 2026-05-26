@@ -50,6 +50,27 @@ const int RETRANS_COUNTER_NAMES_COUNT = sizeof(RETRANS_COUNTER_NAMES) / sizeof(R
 const std::regex NCCL_HCA_PATTERN("hca\\s+(mlx5_\\d+)");
 const std::regex NCCL_PEER_IP_PATTERN("remoteGids?::ffff:([\\d.]+)");
 
+static const char* ncclFuncStr(int coll) {
+  switch (coll) {
+    case 0: return "Broadcast";
+    case 1: return "Reduce";
+    case 2: return "AllGather";
+    case 3: return "ReduceScatter";
+    case 4: return "AllReduce";
+    case 5: return "SendRecv";
+    case 6: return "Send";
+    case 7: return "Recv";
+    case 8: return "AlltoAll";
+    case 9: return "Scatter";
+    case 10: return "Gather";
+    case 11: return "AllGatherV";
+    case 12: return "PutSignal";
+    case 13: return "Signal";
+    case 14: return "WaitSignal";
+    default: return "Unknown";
+  }
+}
+
 // ---- JSON field extraction helpers ----
 
 /**
@@ -781,6 +802,7 @@ void NetworkObserver::handleSwitchDropEvent(const ruijie_json::JsonRequest& even
   incident.confirmed = false;
   incident.confirmTime = 0;
   incident.ncclError = "";
+  incident.coll = -1;
 
   if (ret.first) {
     auto retransToIt = ret.second.find("roce_adp_retrans_to");
@@ -954,6 +976,9 @@ void NetworkObserver::emitConfirmedAlert(const Incident& incident) {
   if (!incident.ncclError.empty()) {
     oss << "  NCCL Error:    " << incident.ncclError << "\n";
   }
+  if (incident.coll >= 0) {
+    oss << "  NCCL Op:       " << ncclFuncStr(incident.coll) << " (" << incident.coll << ")\n";
+  }
   oss << "  Root Cause:     [Confirmed] Switch drop caused RDMA timeout on " << incident.rdmaNic << "\n";
   oss << "  Impact:         Training stalled, NCCL timeout likely\n";
   oss << "  Status:        CONFIRMED - RDMA timeout reached\n";
@@ -985,6 +1010,9 @@ void NetworkObserver::emitConfirmedAlert(const Incident& incident) {
   }
   if (!incident.ncclError.empty()) {
     fprintf(stderr, "  %sNCCL Error:%s    %s\n", COLOR_CYAN, COLOR_RESET, incident.ncclError.c_str());
+  }
+  if (incident.coll >= 0) {
+    fprintf(stderr, "  %sNCCL Op:%s       %s (%d)\n", COLOR_CYAN, COLOR_RESET, ncclFuncStr(incident.coll), incident.coll);
   }
   fprintf(stderr, "  %sRoot Cause:%s     [Confirmed] Switch drop caused RDMA timeout on %s\n",
        COLOR_CYAN, COLOR_RESET, incident.rdmaNic.c_str());
@@ -1825,9 +1853,9 @@ void ncclNetObservUpdateRankTopology(const std::vector<std::vector<int>>& nodeRa
  * 该函数在IB传输层检测到CQE错误时被调用，无需等待NCCL异常。
  * peerIp是对端节点的RDMA NIC IP，用于在portMapping中通过rdmaNicIp字段查找对端交换机端口。
  */
-void NetworkObserver::handleIbError(const std::string& rdmaNic, const std::string& peerIp, int wcStatus, int tpRank, int tpRemoteRank) {
-  INFO(NCCL_NET, "NET_OBSERV: Direct IB error from %s, peerRdmaNicIp=%s, wc_status=%d, tpRank=%d, tpRemoteRank=%d",
-       rdmaNic.c_str(), peerIp.c_str(), wcStatus, tpRank, tpRemoteRank);
+void NetworkObserver::handleIbError(const std::string& rdmaNic, const std::string& peerIp, int wcStatus, int tpRank, int tpRemoteRank, int coll) {
+  INFO(NCCL_NET, "NET_OBSERV: Direct IB error from %s, peerRdmaNicIp=%s, wc_status=%d, tpRank=%d, tpRemoteRank=%d, coll=%d",
+       rdmaNic.c_str(), peerIp.c_str(), wcStatus, tpRank, tpRemoteRank, coll);
 
   std::lock_guard<std::mutex> lock(incidentsMutex_);
 
@@ -1853,6 +1881,7 @@ void NetworkObserver::handleIbError(const std::string& rdmaNic, const std::strin
   for (auto* incident : matched) {
     // 更新受到影响的rank信息
     incident->affectedRanks = {tpRank, tpRemoteRank};
+    incident->coll = coll;
     // 获取最新的NIC计数器
     std::pair<bool, std::map<std::string, int64_t>> ret =
         nicReader_.checkNicRetrans(incident->rdmaNic);
@@ -1903,7 +1932,7 @@ void NetworkObserver::handleIbError(const std::string& rdmaNic, const std::strin
  * @param peerIp 对端RDMA NIC的IP地址（可选，如"192.168.1.17"）
  * @param wcStatus IB工作完成状态码
  */
-void ncclNetObservHandleIbError(const char* rdmaNic, const char* peerIp, int wcStatus, int tpRank, int tpRemoteRank) {
+void ncclNetObservHandleIbError(const char* rdmaNic, const char* peerIp, int wcStatus, int tpRank, int tpRemoteRank, int coll) {
   if (!rdmaNic || !g_netObserver) {
     INFO(NCCL_NET, "NET/OBSERV: %s: Skipping IB error handling (rdmaNic=%p, g_netObserver=%p)",
          __func__, (void*)rdmaNic, (void*)g_netObserver);
@@ -1922,7 +1951,7 @@ void ncclNetObservHandleIbError(const char* rdmaNic, const char* peerIp, int wcS
     return;
   }
 
-  g_netObserver->handleIbError(nicName, peerIpStr, wcStatus, tpRank, tpRemoteRank);
+  g_netObserver->handleIbError(nicName, peerIpStr, wcStatus, tpRank, tpRemoteRank, coll);
   INFO(NCCL_NET, "NET/OBSERV: %s: IB error handled successfully", __func__);
 }
 

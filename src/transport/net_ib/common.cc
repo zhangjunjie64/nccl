@@ -83,8 +83,14 @@ void ncclIbSetCommRanks(void* comm, int tpRank, int tpRemoteRank, int channelId)
     base->tpRank = tpRank;
     base->tpRemoteRank = tpRemoteRank;
     base->channelId = channelId;
-    INFO(NCCL_NET, "NET/IB: %s: Set comm ranks (tpRank=%d, tpRemoteRank=%d, channelId=%d)",
-         __func__, tpRank, tpRemoteRank, channelId);
+    INFO(NCCL_NET, "NET/IB: %s: Set comm ranks (tpRank=%d, tpRemoteRank=%d, channelId=%d, comm=%p)",
+         __func__, tpRank, tpRemoteRank, channelId, comm);
+  }
+}
+
+void ncclIbSetRequestColl(void* request, uint8_t coll) {
+  if (request) {
+    ((struct ncclIbRequest*)request)->coll = coll;
   }
 }
 

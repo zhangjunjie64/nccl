@@ -25,6 +25,7 @@ ncclResult_t ncclIbGetRequest(struct ncclIbNetCommBase* base, struct ncclIbReque
     if (r->type == NCCL_NET_IB_REQ_UNUSED) {
       r->base = base;
       r->sock = NULL;
+      r->coll = (uint8_t)-1;
       memset(r->devBases, 0, sizeof(r->devBases));
       memset(r->events, 0, sizeof(r->events));
       *req = r;
@@ -631,7 +632,8 @@ static inline ncclResult_t ncclIbRequestComplete(struct ncclIbRequest* r, int* d
 
 // Log the details of a completion with error. The provided devIndex is the index
 // of the IB device on which the completion was received.
-static ncclResult_t ncclIbLogCompletionWithError(struct ncclIbNetCommBase* commBase, struct ibv_wc* wc, int devIndex, char* peerIpv4, size_t peerIpv4Len) {
+static ncclResult_t ncclIbLogCompletionWithError(struct ncclIbRequest* r, struct ibv_wc* wc, int devIndex, char* peerIpv4, size_t peerIpv4Len) {
+  struct ncclIbNetCommBase* commBase = r->base;
   struct ncclIbNetCommDevBase* devBase = ncclIbGetNetCommDevBase(commBase, devIndex);
   char localGidString[INET6_ADDRSTRLEN] = "";
   char remoteGidString[INET6_ADDRSTRLEN] = "";
@@ -796,7 +798,7 @@ ncclResult_t ncclIbTest(void* request, int* done, int* sizes) {
           if (r->base->resiliency == NULL) {
             WARN("NET/IB: %s: Got CQE with error (devIndex=%d, req=%p, comm=%p (%s), wr_id=%lu, qp_num=%d)", __func__, i, r, r->base, r->base->isSend ? "send" : "recv", wc->wr_id, wc->qp_num);
             char peerIpv4[INET_ADDRSTRLEN] = "";
-            ncclIbLogCompletionWithError(r->base, wc, i, peerIpv4, sizeof(peerIpv4));
+            ncclIbLogCompletionWithError(r, wc, i, peerIpv4, sizeof(peerIpv4));
 
             if (r->devBases[i]) {
               int ibDevN = r->devBases[i]->ibDevN;
@@ -812,7 +814,7 @@ ncclResult_t ncclIbTest(void* request, int* done, int* sizes) {
                 }
                 INFO(NCCL_NET, "NET/IB: %s: Notifying NetworkObserver of IB error (devIndex=%d, ibDevN=%d, devName=%s, peerIp=%s, wcStatus=%d, tpRank=%d, tpRemoteRank=%d)",
                      __func__, i, ibDevN, devName, peerIpBuf, wc->status, r->base->tpRank, r->base->tpRemoteRank);
-                net_observ::ncclNetObservHandleIbError(devName, peerIpBuf, wc->status, r->base->tpRank, r->base->tpRemoteRank);
+                net_observ::ncclNetObservHandleIbError(devName, peerIpBuf, wc->status, r->base->tpRank, r->base->tpRemoteRank, r->coll);
               } else {
                 WARN("NET/IB: %s: Invalid ibDevN for NetworkObserver notification (devIndex=%d, ibDevN=%d, ncclNIbDevs=%d)",
                      __func__, i, ibDevN, ncclNIbDevs);

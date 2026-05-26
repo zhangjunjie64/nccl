@@ -186,6 +186,7 @@ struct ncclIbRequestCompletionRecord {
 struct ncclIbRequest {
   struct ncclIbNetCommBase* base;
   int type;
+  uint8_t coll;
   struct ncclSocket* sock;
   // Array of counters. Each element in the array is populated with the expected
   // number of completion events that the request is expecting to be generated
@@ -547,6 +548,7 @@ static void ncclIbDevFatalError(struct ncclIbDev* dev) {
 ncclResult_t ncclIbStatsCheckFatalCount(struct ncclIbStats* stat, const char* funcName);
 
 void ncclIbSetCommRanks(void* comm, int tpRank, int tpRemoteRank, int channelId);
+void ncclIbSetRequestColl(void* request, uint8_t coll);
 
 extern ncclProfilerCallback_t ncclProfilerFunction;
 

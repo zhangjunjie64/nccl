@@ -21,6 +21,7 @@
 #include "register_inline.h"
 
 extern void ncclIbSetCommRanks(void* comm, int tpRank, int tpRemoteRank, int channelId);
+extern void ncclIbSetRequestColl(void* request, uint8_t coll);
 
 static_assert(sizeof(ncclNetHandle_t) <= CONNECT_SIZE, "NET Connect info is too large");
 
@@ -1357,6 +1358,7 @@ static ncclResult_t sendProxyProgress(struct ncclProxyState* proxyState, struct 
               setXferNetAttrs(proxyState, args, 1);
             NCCLCHECK(proxyState->ncclNet->isend(resources->netSendComm, buff, size, resources->tpRank, sub->sendMhandle, phandle, sub->requests+buffSlot));
             if (sub->requests[buffSlot] != NULL) {
+              ncclIbSetRequestColl(sub->requests[buffSlot], args->collAPI);
               TRACE(NCCL_NET, "sendProxy [%ld/%d/%d] Isend posted, req %p, buff %p, size %d, proto %d, myRank %d, channelId %d, mhandle %p", sub->transmitted, buffSlot, sub->nsteps, sub->requests[buffSlot], buff, size, p, proxyState->tpRank, sub->channelId, sub->sendMhandle);
               sub->transSize = size;
               sub->transmitted += args->sliceSteps;

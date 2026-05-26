@@ -814,7 +814,7 @@ ncclResult_t ncclIbTest(void* request, int* done, int* sizes) {
                 }
                 INFO(NCCL_NET, "NET/IB: %s: Notifying NetworkObserver of IB error (devIndex=%d, ibDevN=%d, devName=%s, peerIp=%s, wcStatus=%d, tpRank=%d, tpRemoteRank=%d)",
                      __func__, i, ibDevN, devName, peerIpBuf, wc->status, r->base->tpRank, r->base->tpRemoteRank);
-                net_observ::ncclNetObservHandleIbError(devName, peerIpBuf, wc->status, r->base->tpRank, r->base->tpRemoteRank, r->coll);
+                net_observ::ncclNetObservHandleIbError(devName, peerIpBuf, wc->status, r->base->tpRank, r->base->tpRemoteRank, r->coll, r->base->isSend);
               } else {
                 WARN("NET/IB: %s: Invalid ibDevN for NetworkObserver notification (devIndex=%d, ibDevN=%d, ncclNIbDevs=%d)",
                      __func__, i, ibDevN, ncclNIbDevs);

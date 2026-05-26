@@ -1519,6 +1519,7 @@ static ncclResult_t recvProxyProgress(struct ncclProxyState* proxyState, struct 
         if (ignoreCompletion) *requestPtr = (void *)NCCL_NET_OPTIONAL_RECV_COMPLETION;
         NCCLCHECK(proxyState->ncclNet->irecv(resources->netRecvComm, subCount, ptrs, sizes, tags, mhandles, phandles, requestPtr));
         if (*requestPtr) {
+          ncclIbSetRequestColl(*requestPtr, args->collAPI);
           subGroup->recvRequestsCache[step%NCCL_STEPS] = *requestPtr;
           subGroup->recvRequestsSubCount = subCount;
           for (int i=0; i<subGroup->groupSize; i++) {

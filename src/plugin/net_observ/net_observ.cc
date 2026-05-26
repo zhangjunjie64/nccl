@@ -803,6 +803,7 @@ void NetworkObserver::handleSwitchDropEvent(const ruijie_json::JsonRequest& even
   incident.confirmTime = 0;
   incident.ncclError = "";
   incident.coll = -1;
+  incident.isSend = false;
 
   if (ret.first) {
     auto retransToIt = ret.second.find("roce_adp_retrans_to");
@@ -1853,9 +1854,9 @@ void ncclNetObservUpdateRankTopology(const std::vector<std::vector<int>>& nodeRa
  * 该函数在IB传输层检测到CQE错误时被调用，无需等待NCCL异常。
  * peerIp是对端节点的RDMA NIC IP，用于在portMapping中通过rdmaNicIp字段查找对端交换机端口。
  */
-void NetworkObserver::handleIbError(const std::string& rdmaNic, const std::string& peerIp, int wcStatus, int tpRank, int tpRemoteRank, int coll) {
-  INFO(NCCL_NET, "NET_OBSERV: Direct IB error from %s, peerRdmaNicIp=%s, wc_status=%d, tpRank=%d, tpRemoteRank=%d, coll=%d",
-       rdmaNic.c_str(), peerIp.c_str(), wcStatus, tpRank, tpRemoteRank, coll);
+void NetworkObserver::handleIbError(const std::string& rdmaNic, const std::string& peerIp, int wcStatus, int tpRank, int tpRemoteRank, int coll, bool isSend) {
+  INFO(NCCL_NET, "NET_OBSERV: Direct IB error from %s, peerRdmaNicIp=%s, wc_status=%d, tpRank=%d, tpRemoteRank=%d, coll=%d, isSend=%d",
+       rdmaNic.c_str(), peerIp.c_str(), wcStatus, tpRank, tpRemoteRank, coll, isSend);
 
   std::lock_guard<std::mutex> lock(incidentsMutex_);
 
@@ -1882,6 +1883,7 @@ void NetworkObserver::handleIbError(const std::string& rdmaNic, const std::strin
     // 更新受到影响的rank信息
     incident->affectedRanks = {tpRank, tpRemoteRank};
     incident->coll = coll;
+    incident->isSend = isSend;
     // 获取最新的NIC计数器
     std::pair<bool, std::map<std::string, int64_t>> ret =
         nicReader_.checkNicRetrans(incident->rdmaNic);
@@ -1914,8 +1916,8 @@ void NetworkObserver::handleIbError(const std::string& rdmaNic, const std::strin
     // 构建错误信息
     char errorBuf[256];
     snprintf(errorBuf, sizeof(errorBuf),
-             "IB CQE error: dev=%s, wc_status=%d, peer=%s",
-             rdmaNic.c_str(), wcStatus, peerIp.c_str());
+             "IB CQE %s error: dev=%s, wc_status=%d, peer=%s",
+             isSend ? "Send" : "Recv", rdmaNic.c_str(), wcStatus, peerIp.c_str());
     incident->ncclError = errorBuf;
 
     // 发送确认告警
@@ -1932,7 +1934,7 @@ void NetworkObserver::handleIbError(const std::string& rdmaNic, const std::strin
  * @param peerIp 对端RDMA NIC的IP地址（可选，如"192.168.1.17"）
  * @param wcStatus IB工作完成状态码
  */
-void ncclNetObservHandleIbError(const char* rdmaNic, const char* peerIp, int wcStatus, int tpRank, int tpRemoteRank, int coll) {
+void ncclNetObservHandleIbError(const char* rdmaNic, const char* peerIp, int wcStatus, int tpRank, int tpRemoteRank, int coll, bool isSend) {
   if (!rdmaNic || !g_netObserver) {
     INFO(NCCL_NET, "NET/OBSERV: %s: Skipping IB error handling (rdmaNic=%p, g_netObserver=%p)",
          __func__, (void*)rdmaNic, (void*)g_netObserver);
@@ -1942,8 +1944,8 @@ void ncclNetObservHandleIbError(const char* rdmaNic, const char* peerIp, int wcS
   std::string nicName(rdmaNic);
   std::string peerIpStr(peerIp ? peerIp : "");
 
-  INFO(NCCL_NET, "NET/OBSERV: %s: Handling IB error (rdmaNic=%s, peerRdmaNicIp=%s, wcStatus=%d, tpRank=%d, tpRemoteRank=%d)",
-       __func__, rdmaNic, peerIpStr.c_str(), wcStatus, tpRank, tpRemoteRank);
+  INFO(NCCL_NET, "NET/OBSERV: %s: Handling IB error (rdmaNic=%s, peerRdmaNicIp=%s, wcStatus=%d, tpRank=%d, tpRemoteRank=%d, coll=%d, isSend=%d)",
+       __func__, rdmaNic, peerIpStr.c_str(), wcStatus, tpRank, tpRemoteRank, coll, isSend);
 
   std::lock_guard<std::mutex> lock(g_netObservMutex);
   if (!g_netObservTopology) {
@@ -1951,7 +1953,7 @@ void ncclNetObservHandleIbError(const char* rdmaNic, const char* peerIp, int wcS
     return;
   }
 
-  g_netObserver->handleIbError(nicName, peerIpStr, wcStatus, tpRank, tpRemoteRank, coll);
+  g_netObserver->handleIbError(nicName, peerIpStr, wcStatus, tpRank, tpRemoteRank, coll, isSend);
   INFO(NCCL_NET, "NET/OBSERV: %s: IB error handled successfully", __func__);
 }
 

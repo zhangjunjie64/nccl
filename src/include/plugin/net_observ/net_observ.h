@@ -14,6 +14,7 @@
 #include <unordered_map>
 #include <memory>
 #include <mutex>
+#include <condition_variable>
 #include <thread>
 #include <regex>
 #include <cstdint>
@@ -64,9 +65,8 @@ struct NicDeviceInfo {
 
 struct PortMappingInfo {
   std::string node;
-  std::vector<int> ranks;
   std::string rdmaNic;
-  std::string rdmaNicIp;  // RDMA NIC IP address (e.g., "192.168.1.17")
+  std::string rdmaNicIp;
 };
 
 struct Incident {
@@ -110,7 +110,6 @@ struct LldpTopologyEntry {
   std::string nodeIp;
   std::string rdmaNic;
   std::string rdmaNicIp;  // RDMA NIC IP address (e.g., "192.168.1.17")
-  std::string description;
 };
 
 class TopologyConfig {
@@ -121,7 +120,6 @@ class TopologyConfig {
   std::map<std::string, PortMappingInfo> portMapping;
 
   std::vector<std::string> getPortsForNode(const std::string& nodeIp) const;
-  std::vector<int> getRanksForPort(const std::string& portName) const;
   std::string getNodeForPort(const std::string& portName) const;
   std::string getRdmaNicForPort(const std::string& portName) const;
   std::vector<std::string> getAllPorts() const;
@@ -159,15 +157,18 @@ class SwitchEventServicer : public ruijie_json::Json::Service {
                               ruijie_json::JsonRequest>* stream) override;
 
   std::vector<ruijie_json::JsonRequest> getPendingEvents();
+  std::vector<ruijie_json::JsonRequest> waitForPendingEvents(double timeoutSec);
+  void notifyStop();
 
  private:
   std::mutex mtx_;
   std::vector<ruijie_json::JsonRequest> events_;
+  std::condition_variable cv_;
 };
 
 class NetworkObserver {
  public:
-  NetworkObserver(TopologyConfig* topology, int rank, double pollInterval = 2.0);
+  NetworkObserver(TopologyConfig* topology, double pollInterval = 2.0, int mode = 0);
   ~NetworkObserver();
 
   int start();
@@ -183,7 +184,6 @@ class NetworkObserver {
 
  private:
   TopologyConfig* topology_;
-  int rank_;
   double pollInterval_;
 
   volatile bool stopRequested_;
@@ -195,6 +195,7 @@ class NetworkObserver {
   NicCounterReader nicReader_;
   std::unordered_map<std::string, Incident> activeIncidents_;
   std::mutex incidentsMutex_;
+  int mode_;
   bool lldpHandled_;
 
   void monitorLoop();
@@ -233,12 +234,6 @@ int64_t extractJsonInt(const std::string& json, const std::string& key);
 // Returns 0 on success, non-zero on failure (ncclSuccess/ncclSystemError convention).
 int ncclNetObservInit(void);
 void ncclNetObservFinalize(void);
-
-// ---- Rank topology update (called after ncclCommInitRank) ----
-// Updates the topology mapping with rank distribution information from NCCL comm.
-// This should be called after ncclCommInitRank to get accurate rank-to-node mapping.
-// nodeRanks: array of rank lists for each node, indexed by node ID
-void ncclNetObservUpdateRankTopology(const std::vector<std::vector<int>>& nodeRanks);
 
 // ---- IB error handling (called from net_ib/p2p.cc) ----
 // Directly handles IB completion queue errors from the IB transport layer.

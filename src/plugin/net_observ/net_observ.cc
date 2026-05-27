@@ -79,7 +79,7 @@ static const char* ncclFuncStr(int coll) {
  * @param key 要提取的字段名
  * @return 字段对应的字符串值，未找到返回空字符串
  * 
- * 支持格式："key":"value" 或 "key" : "value"
+ * 支持格式："key":"value"、"key": "value" 或 "key" : "value"
  */
 std::string extractJsonString(const std::string& json, const std::string& key) {
   std::string search = "\"" + key + "\":\"";
@@ -87,7 +87,11 @@ std::string extractJsonString(const std::string& json, const std::string& key) {
   if (pos == std::string::npos) {
     search = "\"" + key + "\" : \"";
     pos = json.find(search);
-    if (pos == std::string::npos) return "";
+    if (pos == std::string::npos) {
+      search = "\"" + key + "\": \"";
+      pos = json.find(search);
+      if (pos == std::string::npos) return "";
+    }
   }
   pos += search.length();
   auto end = json.find("\"", pos);
@@ -181,12 +185,6 @@ std::vector<std::string> TopologyConfig::getPortsForNode(const std::string& node
  * @param portName 交换机端口名称
  * @return rank列表，端口不存在返回空列表
  */
-std::vector<int> TopologyConfig::getRanksForPort(const std::string& portName) const {
-  auto it = portMapping.find(portName);
-  if (it != portMapping.end()) return it->second.ranks;
-  return {};
-}
-
 /**
  * @brief 获取指定端口关联的节点IP
  * @param portName 交换机端口名称
@@ -322,25 +320,8 @@ TopologyConfig TopologyConfig::loadFromFile(const std::string& configPath) {
     info.rdmaNic = extractJsonString(portObj, "rdma_nic");
     info.rdmaNicIp = extractJsonString(portObj, "rdma_nic_ip");
 
-    // Parse ranks array
-    auto ranksStart = portObj.find("\"ranks\"");
-    if (ranksStart != std::string::npos) {
-      auto arrStart = portObj.find("[", ranksStart);
-      if (arrStart != std::string::npos) {
-        auto arrEnd = portObj.find("]", arrStart);
-        if (arrEnd != std::string::npos) {
-          std::string arrStr = portObj.substr(arrStart + 1, arrEnd - arrStart - 1);
-          std::stringstream ss(arrStr);
-          std::string token;
-          while (std::getline(ss, token, ',')) {
-            token = trim(token);
-            if (!token.empty()) {
-              info.ranks.push_back(std::stoi(token));
-            }
-          }
-        }
-      }
-    }
+    INFO(NCCL_NET, "NET_OBSERV: Port %s -> node=%s, rdma_nic=%s, rdma_nic_ip=%s",
+         portName.c_str(), info.node.c_str(), info.rdmaNic.c_str(), info.rdmaNicIp.c_str());
 
     cfg.portMapping[portName] = info;
     pos = valEnd + 1;
@@ -557,10 +538,13 @@ grpc::Status SwitchEventServicer::JsonSend(
     const ruijie_json::JsonRequest* request,
     ruijie_json::JsonReply* response) {
   (void)context;
+  INFO(NCCL_NET, "NET/OBSERV: JsonSend received event_id=0x%08x, json_string_len=%zu",
+       request->json_event(), request->json_string().size());
   {
     std::lock_guard<std::mutex> lock(mtx_);
     events_.push_back(*request);
   }
+  cv_.notify_one();
   response->set_ret(0);
   return grpc::Status::OK;
 }
@@ -578,10 +562,13 @@ grpc::Status SwitchEventServicer::JsonStreamSend(
     grpc::ServerReaderWriter<ruijie_json::JsonReply, ruijie_json::JsonRequest>* stream) {
   ruijie_json::JsonRequest request;
   while (stream->Read(&request)) {
+    INFO(NCCL_NET, "NET/OBSERV: JsonStreamSend received event_id=0x%08x, json_string_len=%zu",
+         request.json_event(), request.json_string().size());
     {
       std::lock_guard<std::mutex> lock(mtx_);
       events_.push_back(request);
     }
+    cv_.notify_one();
     ruijie_json::JsonReply reply;
     reply.set_ret(0);
     stream->Write(reply);
@@ -602,6 +589,18 @@ std::vector<ruijie_json::JsonRequest> SwitchEventServicer::getPendingEvents() {
   return events;
 }
 
+std::vector<ruijie_json::JsonRequest> SwitchEventServicer::waitForPendingEvents(double timeoutSec) {
+  std::unique_lock<std::mutex> lock(mtx_);
+  cv_.wait_for(lock, std::chrono::duration<double>(timeoutSec));
+  std::vector<ruijie_json::JsonRequest> events = std::move(events_);
+  events_.clear();
+  return events;
+}
+
+void SwitchEventServicer::notifyStop() {
+  cv_.notify_one();
+}
+
 // ---- NetworkObserver ----
 
 /**
@@ -610,12 +609,12 @@ std::vector<ruijie_json::JsonRequest> SwitchEventServicer::getPendingEvents() {
  * @param rank 当前NCCL rank
  * @param pollInterval 事件轮询间隔（秒）
  */
-NetworkObserver::NetworkObserver(TopologyConfig* topology, int rank, double pollInterval)
+NetworkObserver::NetworkObserver(TopologyConfig* topology, double pollInterval, int mode)
   : topology_(topology)
-  , rank_(rank)
   , pollInterval_(pollInterval)
   , stopRequested_(false)
   , incidentId_(0)
+  , mode_(mode)
   , lldpHandled_(false) {
 }
 
@@ -675,6 +674,7 @@ int NetworkObserver::start() {
  */
 void NetworkObserver::stop() {
   stopRequested_ = true;
+  eventServicer_.notifyStop();
   if (monitorThread_ && monitorThread_->joinable()) {
     monitorThread_->join();
   }
@@ -695,14 +695,16 @@ void NetworkObserver::stop() {
 void NetworkObserver::monitorLoop() {
   while (!stopRequested_) {
     try {
-      auto events = eventServicer_.getPendingEvents();
+      auto events = eventServicer_.waitForPendingEvents(pollInterval_);
+      if (!events.empty()) {
+        INFO(NCCL_NET, "NET_OBSERV: monitorLoop received %zu events", events.size());
+      }
       for (const auto& event : events) {
         handleEvent(event);
       }
     } catch (const std::exception& e) {
       INFO(NCCL_NET, "NET_OBSERV: Monitor error: %s", e.what());
     }
-    std::this_thread::sleep_for(std::chrono::duration<double>(pollInterval_));
   }
 }
 
@@ -720,9 +722,15 @@ constexpr uint32_t GRPC_JSON_EVENT_SAMPLE_LLDP_INFO = 0x10080000;
  */
 void NetworkObserver::handleEvent(const ruijie_json::JsonRequest& event) {
   uint32_t eventId = event.json_event();
+  INFO(NCCL_NET, "NET_OBSERV: handleEvent received event_id=0x%08x, device_model=%s, json_string_len=%zu",
+       eventId,
+       event.has_device_info() ? event.device_info().device_model().c_str() : "N/A",
+       event.json_string().size());
 
   if (eventId == GRPC_JSON_EVENT_SAMPLE_LLDP_INFO) {
-    if (!lldpHandled_) {
+    if (mode_ != 0) {
+      INFO(NCCL_NET, "NET_OBSERV: Skipping LLDP event in config file mode (mode=%d)", mode_);
+    } else if (!lldpHandled_) {
       handleLldpEvent(event);
       lldpHandled_ = true;
     }
@@ -773,7 +781,6 @@ void NetworkObserver::handleSwitchDropEvent(const ruijie_json::JsonRequest& even
 
   int incId = ++incidentId_;
 
-  auto affectedRanks = topology_->getRanksForPort(portName);
   std::string rdmaNic = topology_->getRdmaNicForPort(portName);
 
   std::pair<bool, std::map<std::string, int64_t>> ret = nicReader_.checkNicRetrans(rdmaNic);
@@ -826,6 +833,8 @@ void NetworkObserver::handleSwitchDropEvent(const ruijie_json::JsonRequest& even
   {
     std::lock_guard<std::mutex> lock(incidentsMutex_);
     activeIncidents_[portName] = incident;
+    INFO(NCCL_NET, "NET_OBSERV: handleSwitchDropEvent inserted incident id=%s, port=%s, rdmaNic=%s, activeIncidents size=%zu",
+         incident.incidentTag.c_str(), portName.c_str(), rdmaNic.c_str(), activeIncidents_.size());
   }
 }
 
@@ -860,11 +869,6 @@ void NetworkObserver::emitSwitchDropAlert(const Incident& incident) {
  * 预测可能发生NCCL超时，建议 preemptive 检查
  */
 void NetworkObserver::emitPredictiveAlert(const Incident& incident) {
-  std::string rankStr;
-  for (size_t i = 0; i < incident.affectedRanks.size(); i++) {
-    if (i > 0) rankStr += ", ";
-    rankStr += "Rank-" + std::to_string(incident.affectedRanks[i]);
-  }
 
   WARN("%s%s========================================================================%s", COLOR_MAGENTA, COLOR_BOLD,
        COLOR_RESET);
@@ -1026,7 +1030,10 @@ void NetworkObserver::emitConfirmedAlert(const Incident& incident) {
   fprintf(stderr, "%s%s========================================================================%s\n",
        COLOR_RED, COLOR_BOLD, COLOR_RESET);
 
-  writeAlertToLogFile("/tmp/net_observ.log", oss.str());
+  const char* logEnable = ncclGetEnv("NCCL_NET_OBSERV_LOG_ENABLE");
+  if (logEnable && atoi(logEnable) == 1) {
+    writeAlertToLogFile("/tmp/net_observ.log", oss.str());
+  }
 }
 
 /**
@@ -1539,16 +1546,18 @@ void NetworkObserver::updateTopologyFromLldp(const std::vector<LldpNeighborInfo>
     RdmaNicInfo nicInfo = inferRdmaNicFromPortDesc(info.remotePortDesc, info.nodeIp);
     entry.rdmaNic = nicInfo.name;
     entry.rdmaNicIp = nicInfo.ip;
-    entry.description = info.remoteSysName + " (" + info.remotePortDesc + ")";
+
+    PortMappingInfo pmInfo;
+    pmInfo.node = entry.nodeIp;
+    pmInfo.rdmaNic = entry.rdmaNic;
+    pmInfo.rdmaNicIp = entry.rdmaNicIp;
+    topology_->portMapping[entry.switchPort] = pmInfo;
 
     if (!entry.rdmaNic.empty()) {
       entries.push_back(entry);
-
-      PortMappingInfo pmInfo;
-      pmInfo.node = entry.nodeIp;
-      pmInfo.rdmaNic = entry.rdmaNic;
-      pmInfo.rdmaNicIp = entry.rdmaNicIp;
-      topology_->portMapping[entry.switchPort] = pmInfo;
+    } else {
+      fprintf(stdout, "NET_OBSERV: Port %s mapped to node %s but RDMA NIC unknown (SSH query failed for %s)\n",
+              entry.switchPort.c_str(), entry.nodeIp.c_str(), info.remotePortDesc.c_str());
     }
   }
 
@@ -1610,8 +1619,19 @@ void NetworkObserver::handleLldpEvent(const ruijie_json::JsonRequest& event) {
     return;
   }
 
-  fprintf(stdout, "NET_OBSERV: Received LLDP event (0x%08x) from %s, %zu neighbors\n",
-          GRPC_JSON_EVENT_SAMPLE_LLDP_INFO, deviceModel.c_str(), lldpInfos.size());
+  std::string tsRaw = extractJsonString(jsonString, "timestamp");
+  std::string eventTs = formatTimestamp(tsRaw);
+
+  auto now = std::chrono::system_clock::now();
+  auto nowTimeT = std::chrono::system_clock::to_time_t(now);
+  char recvTs[64];
+  struct tm utcTm;
+  gmtime_r(&nowTimeT, &utcTm);
+  strftime(recvTs, sizeof(recvTs), "%Y-%m-%d %H:%M:%S UTC", &utcTm);
+
+  fprintf(stdout, "NET_OBSERV: Received LLDP event (0x%08x) from %s, %zu neighbors, event_ts=%s, recv_ts=%s\n",
+          GRPC_JSON_EVENT_SAMPLE_LLDP_INFO, deviceModel.c_str(), lldpInfos.size(),
+          eventTs.c_str(), recvTs);
 
   updateTopologyFromLldp(lldpInfos, deviceModel);
 }
@@ -1723,7 +1743,7 @@ int ncclNetObservInit(void) {
     g_netObservTopology = new TopologyConfig();
     g_netObservTopology->grpcPort = grpcPort;
 
-    g_netObserver = new NetworkObserver(g_netObservTopology, /*rank*/0, pollInterval);
+    g_netObserver = new NetworkObserver(g_netObservTopology, pollInterval, mode);
     int ret = g_netObserver->start();
     if (ret != 0) {
       INFO(NCCL_NET, "NET_OBSERV: Failed to start NetworkObserver");
@@ -1751,7 +1771,7 @@ int ncclNetObservInit(void) {
 
     g_netObservTopology = new TopologyConfig(TopologyConfig::loadFromFile(configPath));
 
-    g_netObserver = new NetworkObserver(g_netObservTopology, /*rank*/0, pollInterval);
+    g_netObserver = new NetworkObserver(g_netObservTopology, pollInterval, mode);
     int ret = g_netObserver->start();
     if (ret != 0) {
       INFO(NCCL_NET, "NET_OBSERV: Failed to start NetworkObserver");
@@ -1784,72 +1804,14 @@ void ncclNetObservFinalize(void) {
 }
 
 /**
- * @brief 更新rank拓扑映射（在ncclCommInitRank后调用）
- * @param nodeRanks 每个节点包含的rank列表，按node ID索引
- *
- * 该函数在NCCL通信域建立后被调用，用于更新拓扑中的rank分布信息。
- * 通过node ID（从LLDP事件中获取的节点顺序）匹配，而不是通过IP地址。
- */
-void ncclNetObservUpdateRankTopology(const std::vector<std::vector<int>>& nodeRanks) {
-  std::lock_guard<std::mutex> lock(g_netObservMutex);
-  if (!g_netObservTopology) {
-    INFO(NCCL_NET, "NET_OBSERV: Cannot update rank topology, NetworkObserver not initialized");
-    return;
-  }
-
-  // 收集topology中所有唯一的节点IP，并按出现顺序分配node ID
-  std::vector<std::string> uniqueNodes;
-  for (const auto& entry : g_netObservTopology->portMapping) {
-    const std::string& nodeIp = entry.second.node;
-    // 检查是否已存在
-    bool found = false;
-    for (const auto& existing : uniqueNodes) {
-      if (existing == nodeIp) {
-        found = true;
-        break;
-      }
-    }
-    if (!found) {
-      uniqueNodes.push_back(nodeIp);
-    }
-  }
-
-  // 按node ID顺序更新每个节点的ranks
-  for (size_t nodeId = 0; nodeId < nodeRanks.size() && nodeId < uniqueNodes.size(); nodeId++) {
-    const std::string& nodeIp = uniqueNodes[nodeId];
-    const std::vector<int>& ranks = nodeRanks[nodeId];
-
-    // 更新该节点IP对应的所有端口映射
-    for (auto& entry : g_netObservTopology->portMapping) {
-      if (entry.second.node == nodeIp) {
-        entry.second.ranks = ranks;
-        INFO(NCCL_INIT|NCCL_NET, "NET_OBSERV: Updated port %s with %zu ranks for node %s",
-             entry.first.c_str(), ranks.size(), nodeIp.c_str());
-      }
-    }
-  }
-
-  // 打印更新后的拓扑信息
-  INFO(NCCL_INIT|NCCL_NET, "NET_OBSERV: Rank topology updated for %zu nodes", nodeRanks.size());
-  for (size_t i = 0; i < nodeRanks.size() && i < uniqueNodes.size(); i++) {
-    std::string ranksStr;
-    if (nodeRanks[i].size() <= 4) {
-      for (size_t j = 0; j < nodeRanks[i].size(); j++) {
-        if (j > 0) ranksStr += ",";
-        ranksStr += std::to_string(nodeRanks[i][j]);
-      }
-    } else {
-      ranksStr = std::to_string(nodeRanks[i].front()) + "-" + std::to_string(nodeRanks[i].back());
-    }
-    INFO(NCCL_INIT|NCCL_NET, "NET_OBSERV:   Node %s: ranks [%s]", uniqueNodes[i].c_str(), ranksStr.c_str());
-  }
-}
-
-/**
  * @brief NetworkObserver成员方法：处理IB传输层错误
  * @param rdmaNic RDMA网卡设备名
  * @param peerIp 对端RDMA NIC的IP地址（可选，如"192.168.1.17"）
  * @param wcStatus IB工作完成状态码
+ * @param tpRank 本地NCCL排名（如0, 1, 2...）
+ * @param tpRemoteRank 对端NCCL排名（如0, 1, 2...）
+ * @param coll NCCL收集操作类型（如0=broadcast, 1=reduce, 2=allgather, 3=reducescatter...）
+ * @param isSend 是否为发送操作（true=发送, false=接收）
  *
  * 该函数在IB传输层检测到CQE错误时被调用，无需等待NCCL异常。
  * peerIp是对端节点的RDMA NIC IP，用于在portMapping中通过rdmaNicIp字段查找对端交换机端口。
@@ -1860,6 +1822,8 @@ void NetworkObserver::handleIbError(const std::string& rdmaNic, const std::strin
 
   std::lock_guard<std::mutex> lock(incidentsMutex_);
 
+  INFO(NCCL_NET, "NET_OBSERV: handleIbError matching incidents, total active=%zu", activeIncidents_.size());
+
   // 查找匹配的未确认告警
   std::vector<Incident*> matched;
   for (auto& entry : activeIncidents_) {
@@ -1869,18 +1833,21 @@ void NetworkObserver::handleIbError(const std::string& rdmaNic, const std::strin
     }
   }
 
+  INFO(NCCL_NET, "NET_OBSERV: handleIbError matched %zu by rdmaNic=%s", matched.size(), rdmaNic.c_str());
+
   // 如果没有精确匹配，匹配所有未确认的告警
   if (matched.empty()) {
+    INFO(NCCL_NET, "NET_OBSERV: handleIbError no rdmaNic match, falling back to all unconfirmed incidents");
     for (auto& entry : activeIncidents_) {
       if (!entry.second.confirmed) {
         matched.push_back(&entry.second);
       }
     }
+    INFO(NCCL_NET, "NET_OBSERV: handleIbError fallback matched %zu incidents", matched.size());
   }
 
   // 更新并确认告警
   for (auto* incident : matched) {
-    // 更新受到影响的rank信息
     incident->affectedRanks = {tpRank, tpRemoteRank};
     incident->coll = coll;
     incident->isSend = isSend;
@@ -1933,6 +1900,10 @@ void NetworkObserver::handleIbError(const std::string& rdmaNic, const std::strin
  * @param rdmaNic RDMA网卡设备名
  * @param peerIp 对端RDMA NIC的IP地址（可选，如"192.168.1.17"）
  * @param wcStatus IB工作完成状态码
+ * @param tpRank 本地NCCL排名（如0, 1, 2...）
+ * @param tpRemoteRank 对端NCCL排名（如0, 1, 2...）
+ * @param coll NCCL收集操作类型（如0=broadcast, 1=reduce, 2=allgather, 3=reducescatter...）
+ * @param isSend 是否为发送操作（true=发送, false=接收）
  */
 void ncclNetObservHandleIbError(const char* rdmaNic, const char* peerIp, int wcStatus, int tpRank, int tpRemoteRank, int coll, bool isSend) {
   if (!rdmaNic || !g_netObserver) {

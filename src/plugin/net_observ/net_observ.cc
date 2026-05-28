@@ -1858,18 +1858,57 @@ void NetworkObserver::handleIbError(const std::string& rdmaNic, const std::strin
       incident->nicDelta = ret.second;
     }
 
-    // If peerIp (peer RDMA NIC IP) is provided, update fault path by matching it in portMapping
+    std::string localPort, remotePort;
     if (!peerIp.empty()) {
-      INFO(NCCL_NET, "NET/OBSERV: Building fault path for peerRdmaNicIp=%s, rdmaNic=%s, localPort=%s",
-           peerIp.c_str(), incident->rdmaNic.c_str(), incident->portName.c_str());
-      // Lookup peer port by RDMA NIC IP in portMapping
-      std::string peerPort = topology_->getPortByRdmaNicIp(peerIp);
-      if (!peerPort.empty()) {
-        INFO(NCCL_NET, "NET/OBSERV: Found peerPort via getPortByRdmaNicIp: %s", peerPort.c_str());
-        incident->faultPaths = buildFaultPath(
-            {incident->portName}, incident->deviceModel, peerPort, tpRank, tpRemoteRank);
+      std::string localRdmaIp = getLocalRdmaNicIp(rdmaNic);
+      localPort = topology_->getPortByRdmaNicIp(localRdmaIp);
+      remotePort = topology_->getPortByRdmaNicIp(peerIp);
+
+      INFO(NCCL_NET, "NET/OBSERV: Building fault path: isSend=%d, rdmaNic=%s, localRdmaIp=%s, localPort=%s, peerIp=%s, remotePort=%s, incidentPort=%s",
+           isSend, rdmaNic.c_str(), localRdmaIp.c_str(), localPort.c_str(),
+           peerIp.c_str(), remotePort.c_str(), incident->portName.c_str());
+
+      std::string senderPort, receiverPort;
+      int senderRank, receiverRank;
+
+      if (isSend) {
+        senderPort = localPort;
+        receiverPort = remotePort;
+        senderRank = tpRank;
+        receiverRank = tpRemoteRank;
       } else {
-        INFO(NCCL_NET, "NET/OBSERV: peerRdmaNicIp %s not found in portMapping, fault path unchanged", peerIp.c_str());
+        senderPort = remotePort;
+        receiverPort = localPort;
+        senderRank = tpRemoteRank;
+        receiverRank = tpRank;
+      }
+
+      if (!senderPort.empty() && !receiverPort.empty() && senderPort != receiverPort) {
+        INFO(NCCL_NET, "NET/OBSERV: Data flow: senderRank=%d -> %s -> Switch -> %s -> receiverRank=%d",
+             senderRank, senderPort.c_str(), receiverPort.c_str(), receiverRank);
+        incident->faultPaths = buildFaultPath(
+            {senderPort}, incident->deviceModel, receiverPort, senderRank, receiverRank);
+      } else if (!senderPort.empty() && !receiverPort.empty() && senderPort == receiverPort) {
+        INFO(NCCL_NET, "NET/OBSERV: senderPort=%s same as receiverPort, searching portMapping for alternative",
+             senderPort.c_str());
+        std::string faultNode = topology_->getNodeForPort(incident->portName);
+        for (const auto& pmEntry : topology_->portMapping) {
+          if (pmEntry.first != incident->portName && pmEntry.second.node != faultNode) {
+            INFO(NCCL_NET, "NET/OBSERV: Fallback found port=%s (node=%s, rdmaNic=%s)",
+                 pmEntry.first.c_str(), pmEntry.second.node.c_str(), pmEntry.second.rdmaNic.c_str());
+            if (isSend) {
+              incident->faultPaths = buildFaultPath(
+                  {senderPort}, incident->deviceModel, pmEntry.first, senderRank, receiverRank);
+            } else {
+              incident->faultPaths = buildFaultPath(
+                  {pmEntry.first}, incident->deviceModel, receiverPort, senderRank, receiverRank);
+            }
+            break;
+          }
+        }
+      } else {
+        INFO(NCCL_NET, "NET/OBSERV: Cannot determine sender/receiver ports (localPort=%s, remotePort=%s), fault path unchanged",
+             localPort.c_str(), remotePort.c_str());
       }
     } else {
       INFO(NCCL_NET, "NET/OBSERV: peerRdmaNicIp is empty, skipping fault path update");
@@ -1882,9 +1921,12 @@ void NetworkObserver::handleIbError(const std::string& rdmaNic, const std::strin
 
     // 构建错误信息
     char errorBuf[256];
+    std::string localMgmtIp = topology_->getNodeForPort(localPort);
     snprintf(errorBuf, sizeof(errorBuf),
-             "IB CQE %s error: dev=%s, wc_status=%d, peer=%s",
-             isSend ? "Send" : "Recv", rdmaNic.c_str(), wcStatus, peerIp.c_str());
+             "IB CQE %s error: local_mgmt=%s, dev=%s, wc_status=%d, peer=%s",
+             isSend ? "Send" : "Recv",
+             localMgmtIp.empty() ? "unknown" : localMgmtIp.c_str(),
+             rdmaNic.c_str(), wcStatus, peerIp.c_str());
     incident->ncclError = errorBuf;
 
     // 发送确认告警

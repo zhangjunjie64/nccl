@@ -3,35 +3,26 @@
  * SPDX-License-Identifier: Apache-2.0
  *
  * See LICENSE.txt for more license information
+ *
+ * Lightweight NCCL plugin header for net_observ daemon client.
+ * No gRPC / protobuf / heavy class dependencies.
+ * Communicates with the standalone net_observ_daemon via:
+ *   - Shared memory (read alerts from daemon)
+ *   - Unix Domain Socket (send IB errors to daemon)
  *************************************************************************/
 
 #ifndef NCCL_NET_OBSERV_H_
 #define NCCL_NET_OBSERV_H_
 
-#include <string>
-#include <vector>
-#include <map>
-#include <unordered_map>
-#include <memory>
-#include <mutex>
-#include <condition_variable>
-#include <thread>
-#include <regex>
 #include <cstdint>
-#include <array>
-
-#include <grpcpp/server_builder.h>
-
-// For gethostname and gethostbyname
-#include <unistd.h>
-#include <netdb.h>
-#include <arpa/inet.h>
-
-#include "ruijie-json.pb.h"
-#include "ruijie-json.grpc.pb.h"
+#include <cstring>
+#include <sys/un.h>
 
 namespace net_observ {
 
+// =========================================================================
+// Color constants for WARN output formatting
+// =========================================================================
 extern const char* const COLOR_RED;
 extern const char* const COLOR_YELLOW;
 extern const char* const COLOR_GREEN;
@@ -41,207 +32,112 @@ extern const char* const COLOR_BOLD;
 extern const char* const COLOR_DIM;
 extern const char* const COLOR_RESET;
 
-enum class AlertLevel {
-  PREDICTIVE,
-  CONFIRMED
+// =========================================================================
+// IPC constants and types (mirrors net_observ_daemon/include/net_observ_ipc.h)
+// =========================================================================
+
+// Unix Domain Socket path (daemon listens here for IB error reports)
+constexpr const char* NET_OBSERV_UDS_PATH = "/tmp/nccl_net_observ.sock";
+
+// Shared memory segment name (daemon writes alerts here)
+constexpr const char* NET_OBSERV_SHM_NAME = "/nccl_net_observ_shm";
+
+// UDS message types
+enum class IpcMessageType : uint32_t {
+  IB_ERROR_REPORT = 1,
+  HEARTBEAT = 2,
+  SHUTDOWN = 3,
 };
 
-extern const char* const RETRANS_COUNTER_NAMES[];
-extern const int RETRANS_COUNTER_NAMES_COUNT;
+// IB error report message (fixed-size for non-blocking datagram send)
+struct IbErrorReport {
+  IpcMessageType type;
+  uint32_t seqNum;
+  int64_t timestamp;  // microseconds since epoch
 
-extern const std::regex NCCL_HCA_PATTERN;
-extern const std::regex NCCL_PEER_IP_PATTERN;
-
-struct NicCounterSnapshot {
-  double timestamp;
-  std::map<std::string, int64_t> counters;
-};
-
-struct NicDeviceInfo {
-  std::string ibDevName;
-  int portNum;
-  std::string sysfsPath;
-};
-
-struct PortMappingInfo {
-  std::string node;
-  std::string rdmaNic;
-  std::string rdmaNicIp;
-};
-
-struct Incident {
-  int incidentId;
-  std::string incidentTag;
-  std::string portName;
-  std::string switchName;
-  std::string deviceModel;
-  int64_t dropCount;
-  std::string timestamp;
-  std::vector<int> affectedRanks;
-  std::vector<std::string> faultPaths;
-  std::string rdmaNic;
-  std::map<std::string, int64_t> nicDelta;
-  bool hasRetryGrowth;
-  double createTime;
-  bool confirmed;
-  double confirmTime;
-  std::string ncclError;
+  char rdmaNic[64];
+  char peerIp[64];
+  int wcStatus;
+  int tpRank;
+  int tpRemoteRank;
   int coll;
-  bool isSend;
+  int isSend;  // bool
+
+  IbErrorReport() {
+    memset(this, 0, sizeof(*this));
+    type = IpcMessageType::IB_ERROR_REPORT;
+  }
 };
 
-struct RdmaNicInfo {
-  std::string name;  // e.g., "mlx5_0"
-  std::string ip;    // e.g., "192.168.1.17"
+static_assert(sizeof(IbErrorReport) <= 4096,
+              "IbErrorReport must fit within typical datagram size");
+
+// Topology table entry (rdmaNic ¡ú portName mapping from LLDP)
+struct TopologyTableEntry {
+  char rdmaNic[32];    // e.g. "mlx5_0"
+  char rdmaNicIp[64];  // e.g. "192.168.1.10"
+  char portName[64];   // e.g. "TFGigabitEthernet 0/31"
+  char nodeIp[64];     // e.g. "10.110.181.242"
 };
 
-struct LldpNeighborInfo {
-  std::string switchPort;
-  std::string nodeIp;
-  std::string remotePortDesc;
-  std::string remoteChassisId;
-  std::string remoteSysName;
-  std::string remoteSysDesc;
-  int64_t timeMark;
+// Per-rank alert entry (rank-specific data for CONFIRMED alerts)
+struct PerRankAlertEntry {
+  int32_t tpRank;            // this rank
+  int32_t tpRemoteRank;      // remote rank
+  int32_t coll;              // NCCL collective op code
+  int32_t isSend;            // 1=Send, 0=Recv
+  char ncclError[256];       // per-rank error message
+  char faultPath[512];       // per-rank fault path
+  int64_t confirmTime;       // epoch seconds when this entry was confirmed
+  // Per-rank switch drop & NIC deltas (captured at UDS arrival time)
+  int64_t dropCount;         // per-rank switch drop count
+  int32_t nicDeltaCount;     // number of valid nic name/value pairs below
+  int32_t padNic_;           // explicit padding
+  char nicDeltaNames[2][32]; // NIC counter names (e.g. "roce_adp_retrans")
+  int64_t nicDeltaValues[2]; // NIC counter delta values
 };
 
-struct LldpTopologyEntry {
-  std::string switchPort;
-  std::string nodeIp;
-  std::string rdmaNic;
-  std::string rdmaNicIp;  // RDMA NIC IP address (e.g., "192.168.1.17")
+// Shared memory layout (daemon writes, NCCL plugin reads)
+struct SharedMemoryLayout {
+  volatile uint64_t version;   // incremented on each update (reader polls this)
+
+  // ---- Common alert fields (shared by all ranks) ----
+  char alertTag[32];           // "NET-10006"
+  char timestamp[64];          // "2026-06-01 06:37:30 UTC"
+  char portName[64];           // "TFGigabitEthernet 0/31"
+  char rdmaNic[32];            // "mlx5_0"
+  char deviceModel[64];        // switch model
+  char switchName[64];         // switch name
+
+  char status[16];             // "WATCH" / "PREDICTIVE" / "CONFIRMED"
+
+  int64_t createTime;          // epoch seconds of incident creation
+
+  // ---- Per-rank alert entries (each rank sees its own) ----
+  int32_t perRankAlertCount;   // number of valid entries in perRankAlerts[]
+  int32_t pad2_;               // explicit padding
+  PerRankAlertEntry perRankAlerts[8];   // up to 8 per-rank alerts
+
+  // ---- Topology table ----
+  int32_t topologyEntryCount;  // number of valid entries in topologyTable[]
+  int32_t pad3_;               // explicit padding
+  TopologyTableEntry topologyTable[8];  // rdmaNic ¡ú portName mapping
+
+  char reserved[128];          // future use
 };
 
-class TopologyConfig {
- public:
-  std::string switchIp;
-  std::string switchName;
-  int grpcPort;
-  std::map<std::string, PortMappingInfo> portMapping;
+static_assert(sizeof(SharedMemoryLayout) <= 16384,
+              "SharedMemoryLayout should fit within 16KB");
 
-  std::vector<std::string> getPortsForNode(const std::string& nodeIp) const;
-  std::string getNodeForPort(const std::string& portName) const;
-  std::string getRdmaNicForPort(const std::string& portName) const;
-  std::vector<std::string> getAllPorts() const;
-  std::string getPortByNodeAndNic(const std::string& nodeIp, const std::string& rdmaNic) const;
-  std::string getPortByRdmaNicIp(const std::string& rdmaNicIp) const;
+// =========================================================================
+// C interface functions (called from init.cc and p2p.cc)
+// =========================================================================
 
-  static TopologyConfig loadFromFile(const std::string& configPath);
-};
-
-class NicCounterReader {
- public:
-  static constexpr const char* IB_SYSFS_BASE = "/sys/class/infiniband";
-
-  NicCounterReader();
-
-  std::vector<std::string> discoverNics();
-  void captureBaseline(const std::string& nicKey = "");
-  std::map<std::string, int64_t> readDelta(const std::string& nicKey);
-  std::pair<bool, std::map<std::string, int64_t>> checkNicRetrans(const std::string& rdmaNic);
-
- private:
-  std::map<std::string, NicDeviceInfo> deviceCache_;
-  std::map<std::string, NicCounterSnapshot> baselines_;
-
-  std::map<std::string, int64_t> readCounters(const std::string& nicKey);
-};
-
-class SwitchEventServicer : public ruijie_json::Json::Service {
- public:
-  grpc::Status JsonSend(grpc::ServerContext* context,
-                        const ruijie_json::JsonRequest* request,
-                        ruijie_json::JsonReply* response) override;
-  grpc::Status JsonStreamSend(grpc::ServerContext* context,
-                              grpc::ServerReaderWriter<ruijie_json::JsonReply,
-                              ruijie_json::JsonRequest>* stream) override;
-
-  std::vector<ruijie_json::JsonRequest> getPendingEvents();
-  std::vector<ruijie_json::JsonRequest> waitForPendingEvents(double timeoutSec);
-  void notifyStop();
-
- private:
-  std::mutex mtx_;
-  std::vector<ruijie_json::JsonRequest> events_;
-  std::condition_variable cv_;
-};
-
-class NetworkObserver {
- public:
-  NetworkObserver(TopologyConfig* topology, double pollInterval = 2.0, int mode = 0);
-  ~NetworkObserver();
-
-  int start();
-  void stop();
-
-  // Direct IB error handling from transport layer
-  void handleIbError(const std::string& rdmaNic, const std::string& peerIp, int wcStatus, int tpRank, int tpRemoteRank, int coll, bool isSend);
-
-  // Accessors for C interface functions
-  NicCounterReader& getNicReader() { return nicReader_; }
-  std::unordered_map<std::string, Incident>& getActiveIncidents() { return activeIncidents_; }
-  std::mutex& getIncidentsMutex() { return incidentsMutex_; }
-
- private:
-  TopologyConfig* topology_;
-  double pollInterval_;
-
-  volatile bool stopRequested_;
-  std::unique_ptr<std::thread> monitorThread_;
-  std::unique_ptr<grpc::Server> grpcServer_;
-  SwitchEventServicer eventServicer_;
-
-  int incidentId_;
-  NicCounterReader nicReader_;
-  std::unordered_map<std::string, Incident> activeIncidents_;
-  std::mutex incidentsMutex_;
-  int mode_;
-  bool lldpHandled_;
-
-  void monitorLoop();
-  void handleEvent(const ruijie_json::JsonRequest& event);
-  void handleSwitchDropEvent(const ruijie_json::JsonRequest& event);
-  void handleLldpEvent(const ruijie_json::JsonRequest& event);
-  std::string formatTimestamp(const std::string& timestampRaw);
-  std::vector<std::string> buildFaultPath(const std::vector<std::string>& affectedPorts,
-                                           const std::string& deviceModel,
-                                           const std::string& peerPort = "",
-                                           int tpRank = -1,
-                                           int tpRemoteRank = -1);
-  std::string formatCounterDelta(const std::map<std::string, int64_t>& delta);
-  void emitSwitchDropAlert(const Incident& incident);
-  void emitPredictiveAlert(const Incident& incident);
-  void emitConfirmedAlert(const Incident& incident);
-
-  std::vector<LldpNeighborInfo> parseLldpJson(const std::string& jsonString);
-  RdmaNicInfo inferRdmaNicFromPortDesc(const std::string& portDesc, const std::string& nodeIp = "");
-  void updateTopologyFromLldp(const std::vector<LldpNeighborInfo>& lldpInfos,
-                              const std::string& deviceModel);
-  void printLldpTopology(const std::vector<LldpTopologyEntry>& entries);
-
-  // SSH remote query helpers
-  std::string getLocalIpAddress();
-  std::string executeCommand(const std::string& cmd);
-  RdmaNicInfo queryRemoteRdmaNic(const std::string& remoteIp, const std::string& netdev);
-};
-
-std::string extractJsonString(const std::string& json, const std::string& key);
-int64_t extractJsonInt(const std::string& json, const std::string& key);
-
-// ---- Global singleton management (integrated into NCCL init) ----
-// Reads NCCL_NET_OBSERV_ENABLE, NCCL_NET_OBSERV_CONFIG, NCCL_NET_OBSERV_POLL_INTERVAL
-// env vars and manages the NetworkObserver lifecycle automatically.
-// Returns 0 on success, non-zero on failure (ncclSuccess/ncclSystemError convention).
 int ncclNetObservInit(void);
 void ncclNetObservFinalize(void);
-
-// ---- IB error handling (called from net_ib/p2p.cc) ----
-// Directly handles IB completion queue errors from the IB transport layer.
-// This provides faster error detection compared to parsing NCCL exceptions.
-// rdmaNic: RDMA NIC device name (e.g., "mlx5_0")
-// peerIp: Peer node IP address (optional, can be empty)
-// wcStatus: IB work completion status code
-void ncclNetObservHandleIbError(const char* rdmaNic, const char* peerIp, int wcStatus, int tpRank, int tpRemoteRank, int coll, bool isSend);
+void ncclNetObservHandleIbError(const char* rdmaNic, const char* peerIp,
+                                 int wcStatus, int tpRank, int tpRemoteRank,
+                                 int coll, bool isSend);
 
 }  // namespace net_observ
 

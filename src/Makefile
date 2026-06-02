@@ -17,14 +17,6 @@ ifeq ($(NCCL_OS_LINUX), 1)
 TRANSPORT_CC := $(filter-out transport/net_socket_stub.cc transport/net_ib_stub.cc,$(TRANSPORT_CC))
 endif
 
-# Protobuf/gRPC generated files for ruijie-json proto (must be defined before LIBSRCFILES)
-RUIJIE_JSON_PB_SRC := plugin/net_observ/ruijie-json.pb.cc plugin/net_observ/ruijie-json.grpc.pb.cc
-RUIJIE_JSON_PB_HDR := include/plugin/net_observ/ruijie-json.pb.h include/plugin/net_observ/ruijie-json.grpc.pb.h
-RUIJIE_JSON_INC    := include/plugin/net_observ
-PROTOC             := protoc
-GRPC_CPP_PLUGIN    := /usr/bin/grpc_cpp_plugin
-RUIJIE_JSON_PROTO  := plugin/net_observ/ruijie-json.proto
-
 LIBSRCFILES := \
 	bootstrap.cc channel.cc collectives.cc debug.cc enqueue.cc group.cc \
 	init.cc proxy.cc transport.cc mnnvl.cc allocator.cc dev_runtime.cc sym_kernels.cc ce_coll.cc mem_manager.cc \
@@ -40,8 +32,7 @@ LIBSRCFILES := \
 	$(wildcard plugin/tuner/*.cc) \
 	$(wildcard plugin/profiler/*.cc) \
 	$(wildcard plugin/env/*.cc) \
-	$(filter-out $(RUIJIE_JSON_PB_SRC),$(wildcard plugin/net_observ/*.cc)) \
-	$(RUIJIE_JSON_PB_SRC) \
+	$(wildcard plugin/net_observ/*.cc) \
 	$(wildcard nccl_device/*.cc) \
 	$(wildcard scheduler/*.cc) \
 	$(wildcard gin/*.cc) \
@@ -95,7 +86,7 @@ LIBOBJ     := $(LIBSRCFILES:%.cc=$(OBJDIR)/%.o)
 BINOBJ     := $(BINSRCFILES:%.cc=$(OBJDIR)/%.o)
 PARAMBINOBJ     := $(PARAMBINSRCFILES:%.cc=$(OBJDIR)/%.o)
 DEPFILES   := $(LIBOBJ:%.o=%.d) $(BINOBJ:%.o=%.d) $(PARAMBINOBJ:%.o=%.d)
-LDFLAGS    += -L${CUDA_LIB} -l$(CUDARTLIB) -lpthread -lrt -ldl -lprotobuf -lgrpc++ -lgrpc -lgpr -labsl_strings -labsl_synchronization -labsl_time -labsl_status
+LDFLAGS    += -L${CUDA_LIB} -l$(CUDARTLIB) -lpthread -lrt -ldl
 INCPLUGIN  := include/plugin
 
 DEVMANIFEST := $(BUILDDIR)/obj/device/manifest
@@ -105,25 +96,6 @@ GIT_VERSION_FILE := $(OBJDIR)/include/nccl_git_version.h
 $(GIT_VERSION_FILE): ALWAYS_REBUILD
 	@mkdir -p $(dir $@)
 	@./misc/generate_git_version.py $@
-
-# Proto compilation for ruijie-json
-RUIJIE_JSON_PB_STAMP := $(OBJDIR)/.ruijie-json-proto-stamp
-
-$(RUIJIE_JSON_PB_STAMP): $(RUIJIE_JSON_PROTO)
-	@printf "Generating %-35s\n" "ruijie-json proto/grpc files"
-	mkdir -p include/plugin/net_observ
-	$(PROTOC) --proto_path=plugin/net_observ \
-		--cpp_out=plugin/net_observ \
-		--grpc_out=plugin/net_observ \
-		--plugin=protoc-gen-grpc=$(GRPC_CPP_PLUGIN) \
-		$(RUIJIE_JSON_PROTO)
-	mv plugin/net_observ/ruijie-json.pb.h include/plugin/net_observ/ruijie-json.pb.h
-	mv plugin/net_observ/ruijie-json.grpc.pb.h include/plugin/net_observ/ruijie-json.grpc.pb.h
-	@mkdir -p $(dir $@) && touch $@
-
-$(RUIJIE_JSON_PB_SRC) $(RUIJIE_JSON_PB_HDR): $(RUIJIE_JSON_PB_STAMP)
-
-$(RUIJIE_JSON_PB_SRC:%.cc=$(OBJDIR)/%.o): $(RUIJIE_JSON_PB_STAMP)
 
 # DOCA GPUNetIO definitions
 DOCA_HOME        ?= transport/net_ib/gdaki/doca-gpunetio
@@ -137,9 +109,7 @@ DOCA_LIBOBJ      := $(DOCA_LIBSRC:%.cpp=$(DOCA_OBJDIR)/%.o)
 LIBOBJ           += $(DOCA_LIBOBJ)
 
 ##### rules
-build : proto lib staticlib binary
-
-proto : $(RUIJIE_JSON_PB_STAMP)
+build : lib staticlib binary
 
 lib : $(INCTARGETS) $(LIBDIR)/$(LIBTARGET) $(PKGDIR)/$(PKGTARGET)
 
@@ -259,8 +229,8 @@ $(PKGDIR)/%.pc : %.pc
 $(OBJDIR)/%.o : %.cc $(INCTARGETS)
 	@printf "Compiling  %-35s > %s\n" $< $@
 	mkdir -p `dirname $@`
-	$(CXX) -I. -I$(INCDIR) -I$(OBJDIR)/include $(CXXFLAGS) -Iinclude -I$(INCPLUGIN) -I$(RUIJIE_JSON_INC) -Iplugin/include -I$(DOCA_HOME)/include -c $< -o $@
-	@$(CXX) -I. -I$(INCDIR) -I$(OBJDIR)/include $(CXXFLAGS) -Iinclude -I$(INCPLUGIN) -I$(RUIJIE_JSON_INC) -Iplugin/include -I$(DOCA_HOME)/include -M $< > $(@:%.o=%.d.tmp)
+	$(CXX) -I. -I$(INCDIR) -I$(OBJDIR)/include $(CXXFLAGS) -Iinclude -I$(INCPLUGIN) -Iplugin/include -I$(DOCA_HOME)/include -c $< -o $@
+	@$(CXX) -I. -I$(INCDIR) -I$(OBJDIR)/include $(CXXFLAGS) -Iinclude -I$(INCPLUGIN) -Iplugin/include -I$(DOCA_HOME)/include -M $< > $(@:%.o=%.d.tmp)
 	@sed "0,/^.*:/s//$(subst /,\/,$@):/" $(@:%.o=%.d.tmp) > $(@:%.o=%.d)
 	@sed -e 's/.*://' -e 's/\\$$//' < $(@:%.o=%.d.tmp) | fmt -1 | \
                 sed -e 's/^ *//' -e 's/$$/:/' >> $(@:%.o=%.d)

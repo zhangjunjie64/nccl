@@ -812,9 +812,11 @@ ncclResult_t ncclIbTest(void* request, int* done, int* sizes) {
                   char* portStart = strchr(peerIpBuf, '<');
                   if (portStart != NULL) *portStart = '\0';
                 }
-                INFO(NCCL_NET, "NET/IB: %s: Notifying NetworkObserver of IB error (devIndex=%d, ibDevN=%d, devName=%s, peerIp=%s, wcStatus=%d, tpRank=%d, tpRemoteRank=%d)",
-                     __func__, i, ibDevN, devName, peerIpBuf, wc->status, r->base->tpRank, r->base->tpRemoteRank);
-                net_observ::ncclNetObservHandleIbError(devName, peerIpBuf, wc->status, r->base->tpRank, r->base->tpRemoteRank, r->coll, r->base->isSend);
+                if (wc->status == IBV_WC_RETRY_EXC_ERR) {
+                  INFO(NCCL_NET, "NET/IB: %s: Notifying NetworkObserver of IB retry exceeded error (devIndex=%d, ibDevN=%d, devName=%s, peerIp=%s, wcStatus=%d, tpRank=%d, tpRemoteRank=%d)",
+                       __func__, i, ibDevN, devName, peerIpBuf, wc->status, r->base->tpRank, r->base->tpRemoteRank);
+                  net_observ::ncclNetObservHandleIbError(devName, peerIpBuf, wc->status, r->base->tpRank, r->base->tpRemoteRank, r->coll, r->base->isSend);
+                }
               } else {
                 WARN("NET/IB: %s: Invalid ibDevN for NetworkObserver notification (devIndex=%d, ibDevN=%d, ncclNIbDevs=%d)",
                      __func__, i, ibDevN, ncclNIbDevs);

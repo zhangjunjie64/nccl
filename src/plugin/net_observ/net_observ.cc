@@ -284,6 +284,20 @@ int ncclNetObservInit(void) {
     memset(&g_udsAddr, 0, sizeof(g_udsAddr));
     g_udsAddr.sun_family = AF_UNIX;
     strncpy(g_udsAddr.sun_path, NET_OBSERV_UDS_PATH, sizeof(g_udsAddr.sun_path) - 1);
+
+    // 2.1 Send baseline reset request to daemon
+    // This is a global operation, no rank info needed
+    BaselineResetRequest resetReq;
+    resetReq.seqNum = ++g_seqNum;
+    resetReq.timestamp = std::chrono::duration_cast<std::chrono::microseconds>(
+        std::chrono::system_clock::now().time_since_epoch()).count();
+    ssize_t sent = sendto(g_udsFd, &resetReq, sizeof(resetReq), 0,
+                          (struct sockaddr*)&g_udsAddr, sizeof(g_udsAddr));
+    if (sent > 0) {
+      INFO(NCCL_NET, "NET/OBSERV: Sent baseline reset request to daemon (seqNum=%u)", resetReq.seqNum);
+    } else {
+      INFO(NCCL_NET, "NET/OBSERV: Failed to send baseline reset request: %s", strerror(errno));
+    }
   }
 
   // 3. Start shared memory poll thread

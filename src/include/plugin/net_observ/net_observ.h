@@ -47,6 +47,7 @@ enum class IpcMessageType : uint32_t {
   IB_ERROR_REPORT = 1,
   HEARTBEAT = 2,
   SHUTDOWN = 3,
+  RESET_BASELINE = 4,
 };
 
 // IB error report message (fixed-size for non-blocking datagram send)
@@ -71,6 +72,22 @@ struct IbErrorReport {
 
 static_assert(sizeof(IbErrorReport) <= 4096,
               "IbErrorReport must fit within typical datagram size");
+
+// Baseline reset request message (NCCL init ¡ú daemon)
+// This is a global operation, no rank-specific info needed
+struct BaselineResetRequest {
+  IpcMessageType type;
+  uint32_t seqNum;
+  int64_t timestamp;
+
+  BaselineResetRequest() {
+    memset(this, 0, sizeof(*this));
+    type = IpcMessageType::RESET_BASELINE;
+  }
+};
+
+static_assert(sizeof(BaselineResetRequest) <= 4096,
+              "BaselineResetRequest must fit within typical datagram size");
 
 // Topology table entry (rdmaNic ¡ú portName mapping from LLDP)
 struct TopologyTableEntry {

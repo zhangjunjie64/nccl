@@ -45,6 +45,7 @@
 namespace net_observ {
 int ncclNetObservInit(void);
 void ncclNetObservFinalize(void);
+void ncclNetObservSetTpRank(int tpRank);
 }
 
 #define STR2(v) #v
@@ -2343,6 +2344,9 @@ static ncclResult_t ncclCommInitRankDev(ncclComm_t* newcomm, int nranks, int nId
   bool launchedJob = false;
   // first call ncclInit, this will setup the environment
   NCCLCHECKGOTO(ncclInit(), res, fail);
+
+  // Set tpRank for net_observ so it can filter per-rank alerts
+  net_observ::ncclNetObservSetTpRank(myrank);
 
   if (ncclDebugLevel > NCCL_LOG_WARN || (ncclDebugLevel != NCCL_LOG_NONE && myrank == 0)) {
     static std::once_flag once;

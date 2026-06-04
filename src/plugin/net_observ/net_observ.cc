@@ -377,4 +377,13 @@ void ncclNetObservHandleIbError(const char* rdmaNic, const char* peerIp,
   }
 }
 
+// =========================================================================
+// ncclNetObservSetTpRank ¡ª set the tpRank for this NCCL process
+// Called from ncclCommInitRankDev in init.cc after communicator is created
+// =========================================================================
+void ncclNetObservSetTpRank(int tpRank) {
+  g_myTpRank = tpRank;
+  INFO(NCCL_NET, "NET/OBSERV: Set tpRank=%d", tpRank);
+}
+
 }  // namespace net_observ

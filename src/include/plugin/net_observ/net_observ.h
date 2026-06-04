@@ -152,6 +152,7 @@ static_assert(sizeof(SharedMemoryLayout) <= 16384,
 
 int ncclNetObservInit(void);
 void ncclNetObservFinalize(void);
+void ncclNetObservSetTpRank(int tpRank);
 void ncclNetObservHandleIbError(const char* rdmaNic, const char* peerIp,
                                  int wcStatus, int tpRank, int tpRemoteRank,
                                  int coll, bool isSend);

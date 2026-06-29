@@ -2,6 +2,8 @@
     global:
         nccl*;
         pnccl*;
+        sendProxyConnect;
+        recvProxyConnect;
         extern "C++" {
             ncclParamNoCacheSet*;
         };

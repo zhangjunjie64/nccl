@@ -821,7 +821,8 @@ static ncclResult_t ncclNetGetDeviceHandle(ncclNetDeviceType type, int version, 
   return ncclSuccess;
 }
 
-static ncclResult_t sendProxyConnect(struct ncclProxyConnection* connection, struct ncclProxyState* proxyState, void* reqBuff, int reqSize, void* respBuff, int respSize, int* done) {
+// Note: extern "C" and visibility("default") added for eBPF uprobe hooking support
+extern "C" __attribute__((visibility("default"))) ncclResult_t sendProxyConnect(struct ncclProxyConnection* connection, struct ncclProxyState* proxyState, void* reqBuff, int reqSize, void* respBuff, int respSize, int* done) {
   struct sendNetResources* resources = (struct sendNetResources*)(connection->transportResources);
   if (reqSize != sizeof(netSendConnectArgs)) return ncclInternalError;
   ncclResult_t ret = ncclSuccess;
@@ -986,7 +987,8 @@ static ncclResult_t sendProxyConnect(struct ncclProxyConnection* connection, str
   return ncclSuccess;
 }
 
-static ncclResult_t recvProxyConnect(struct ncclProxyConnection* connection, struct ncclProxyState* proxyState, void* reqBuff, int reqSize, void* respBuff, int respSize, int* done) {
+// Note: extern "C" and visibility("default") added for eBPF uprobe hooking support
+extern "C" __attribute__((visibility("default"))) ncclResult_t recvProxyConnect(struct ncclProxyConnection* connection, struct ncclProxyState* proxyState, void* reqBuff, int reqSize, void* respBuff, int respSize, int* done) {
   if (reqSize != sizeof(netRecvConnectArgs)) return ncclInternalError;
   struct recvNetResources* resources = (struct recvNetResources*)(connection->transportResources);
   netRecvConnectArgs* req = (netRecvConnectArgs*) reqBuff;

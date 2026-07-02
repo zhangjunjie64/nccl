@@ -333,6 +333,7 @@ struct ncclIbResiliency;
 struct alignas(32) ncclIbNetCommBase {
   ncclNetVDeviceProps_t vProps;
   bool isSend;
+  uint8_t func;  // Collective operation type (ncclFunc_t), for net_observ_daemon eBPF access
   struct ncclIbRequest reqs[NET_IB_MAX_REQUESTS];
   struct ncclIbQp qps[NCCL_IB_MAX_QPS];
   // Array of pointers to the "actual" QPs that are used for data transfers.

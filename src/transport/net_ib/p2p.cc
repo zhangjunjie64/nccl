@@ -653,6 +653,14 @@ extern "C" __attribute__((visibility("default"))) ncclResult_t ncclIbLogCompleti
   return ncclSuccess;
 }
 
+// Setter for net_observ_daemon func field (eBPF uprobe reads it from ncclIbNetCommBase)
+extern "C" __attribute__((visibility("default")))
+void ncclIbSetCommFunc(void* commBase, uint8_t func) {
+  if (commBase) {
+    ((struct ncclIbNetCommBase*)commBase)->func = func;
+  }
+}
+
 static inline ncclResult_t ncclIbCompletionEventProcess(struct ncclIbNetCommBase* commBase, struct ibv_wc* wc, int devIndex) {
   union ncclSocketAddress addr;
   ncclSocketGetAddr(&commBase->sock, &addr);

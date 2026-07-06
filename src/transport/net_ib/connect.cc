@@ -815,6 +815,13 @@ ib_recv_dev_list:
       return ncclInternalError;
     }
   }
+  for (int q = 0; q < comm->base.nqps; q++) {
+    int idx = comm->base.qps[q].devIndex;
+    INFO(NCCL_NET, "NET/IB: sendComm=%p QP[%d]->qp_num=%u devIndex=%d ibDevN=%d devName=%s",
+         comm, q, comm->base.qps[q].qp->qp_num,
+         idx, comm->devs[idx].base.ibDevN,
+         ncclIbDevs[comm->devs[idx].base.ibDevN].devName);
+  }
   trafficClass = ncclIbGetTrafficClass(ctx);
   meta.addr = (uint64_t)comm->ctsFifo;
   meta.sl = (ncclParamIbSl() != -1) ? ncclParamIbSl() : (trafficClass != NCCL_NET_TRAFFIC_CLASS_UNDEF) ? trafficClass : NCCL_IB_SL_DEFAULT;

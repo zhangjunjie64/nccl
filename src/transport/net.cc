@@ -875,8 +875,9 @@ static ncclResult_t sendProxyConnect(struct ncclProxyConnection* connection, str
     *done = 0;
     return ncclInProgress;
   }
+  INFO(NCCL_NET, "NET: sendProxyConnect: channelId=%d netDev=%d tpRank=%d tpRemoteRank=%d sendComm=%p",
+       resources->channelId, resources->netDev, resources->tpRank, resources->tpRemoteRank, resources->netSendComm);
   printNetAttrs(&req->netAttr, "send connect");
-  *done = 1;
 
   if (resources->netDeviceHandle) {
     connection->netDeviceHandle = resources->netDeviceHandle;
